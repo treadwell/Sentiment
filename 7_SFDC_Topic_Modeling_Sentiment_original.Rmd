@@ -1,0 +1,207 @@
+---
+title: "SFDC Topic Modeling and Sentiment"
+author: "Ken Brooks"
+date: "June 3, 2015"
+output: html_document
+---
+
+Adapted from Ted Kwartler (Ted@sportsanalytics.org), Open Data Science Conference Workshop: Intro to Text Mining using R, 5-30-2015, v7.0 Topic Modeling and simple sentiment
+
+```{r}
+#Set the working directory and import libraries
+#setwd("~/Google Drive KB/Open Source Conf")
+
+#libraries
+library(tm)
+library(topicmodels)
+#install.packages('topicmodels')
+library(portfolio) 
+#install.packages("portfolio")
+#library(ggplot2)
+#library(ggthemes)
+library(plyr)
+library(stringr)
+library(dplyr)
+library(readxl)
+
+```
+
+
+Set options and defined functions
+---------------------------------
+
+```{r}
+#options, functions
+options(stringsAsFactors = FALSE)
+Sys.setlocale('LC_ALL','C')
+
+#try to lower function
+tryTolower <- function(x){
+  # return NA when there is an error
+  y = NA
+  # tryCatch error
+  try_error = tryCatch(tolower(x), error = function(e) e)
+  # if not an error
+  if (!inherits(try_error, 'error'))
+    y = tolower(x)
+  return(y)
+}
+
+clean.corpus<-function(corpus){
+  corpus <- tm_map(corpus, removePunctuation)
+  corpus <- tm_map(corpus, stripWhitespace)
+  corpus <- tm_map(corpus, removeNumbers)
+  corpus <- tm_map(corpus, content_transformer(tryTolower))
+  corpus <- tm_map(corpus, removeWords, custom.stopwords)
+  return(corpus)
+}
+
+#Bigram token maker
+bigram.tokenizer <-function(x)
+  unlist(lapply(ngrams(words(x), 2), paste, collapse = " "), use.names = FALSE)
+
+#Bring in subjective lexicons
+pos <- readLines("data/positive_words.txt")
+neg <-readLines("data/negative_words.txt")
+
+#Simple sentiment subject word counter function, poached online
+score.sentiment = function(sentences, pos.words, neg.words, .progress='none')
+{
+  scores = laply(sentences, function(sentence, pos.words, neg.words) {
+    word.list = str_split(sentence, '\\s+')
+    words = unlist(word.list)
+    # compare our words to the dictionaries of positive & negative terms
+    pos.matches = match(words, pos.words)
+    neg.matches = match(words, neg.words)
+    pos.matches = !is.na(pos.matches)
+    neg.matches = !is.na(neg.matches)
+    #TRUE/FALSE will be treated as 1/0 by sum():
+    score = sum(pos.matches) - sum(neg.matches)
+    return(score)
+  }, pos.words, neg.words, .progress=.progress )
+  scores.df = data.frame(score=scores, text=sentences)
+  return(scores.df)
+}
+
+```
+
+Create custom stop words
+------------------------
+
+```{r}
+#Create custom stop words
+
+custom.stopwords <- c(stopwords('english'), 'lol', 'smh')
+
+```
+
+Import and clean text, build dtm
+--------------------------------
+
+```{r}
+
+#bring in some text
+# text<-read.csv('data/SFDC_Survey.csv', header=TRUE)
+text <-readxl::read_excel('data/LP Spring 2016 Student Survey- 3_Free Responses.xlsx')
+col1 = "Comment"
+
+#Create a clean corpus
+corpus <- Corpus(DataframeSource(data.frame(text[[col1]])))
+corpus <-clean.corpus(corpus)
+
+#Make a DTM
+dtm<-DocumentTermMatrix(corpus, control=list(tokenize=bigram.tokenizer))
+
+```
+
+Perform topic modeling
+----------------------
+
+```{r}
+
+#In Topic Modeling, remove any docs with all zeros after removing stopwords
+rowTotals <- apply(dtm , 1, sum) 
+dtm.new   <- dtm[rowTotals> 0, ]
+
+#In Sentiment, to ensure the number of rows in the dtm.new and the sentiment data frame equal
+text <-cbind(text,rowTotals)
+text <- text[rowTotals> 0, ]
+
+#Begin Topic Modeling; can use CTM or LDA
+topic.model <- LDA(dtm.new, control = list(alpha = 0.1), k = 5) 
+
+#Topic Extraction
+topics<-get_terms(topic.model, 5)
+colnames(topics)<-c("topic1","topic2","topic3","topic4","topic5")
+topics<-as.data.frame(topics)
+t1<-paste(topics$topic1,collapse=' ') 
+t2<-paste(topics$topic2,collapse=' ') 
+t3<-paste(topics$topic3,collapse=' ') 
+t4<-paste(topics$topic4,collapse=' ') 
+t5<-paste(topics$topic5,collapse=' ') 
+topics
+
+```
+
+Assign documents to topics
+--------------------------
+
+```{r}
+
+#Score each tweet's probability for the topic models then add the topic words to the df as headers
+scoring<-posterior(topic.model)
+scores<-scoring$topics
+scores<-as.data.frame(scores)
+colnames(scores)<-c(t1,t2,t3,t4,t5)
+
+#The max probability of each tweet classifies the tweet document
+topics.text<-as.data.frame(cbind(row.names(scores),apply(scores,1,function(x) names(scores)[which(x==max(x))]))) 
+
+```
+
+Perform sentiment scoring
+-------------------------
+
+```{r}
+
+#Apply the subjective lexicon scoring function
+
+# sentiment.score<-score.sentiment(text[[col1]], pos, neg, .progress='text')
+sentiment.score<-score.sentiment(text[[col1]], pos, neg)
+
+#Get the length of each doc by number of words not characters
+doc.length<-rowSums(as.matrix(dtm.new))
+
+#Create a unified data frame
+all<-cbind(topics.text,scores,sentiment.score, doc.length)
+names(all)[2]<-paste("topic")
+names(all)[8]<-paste("sentiment")
+names(all)[10]<-paste("length")
+all[all == ""] <- NA
+
+#Make the treemap
+map.market(id=all$V1, area=all$length, group=all$topic, color=all$sentiment, main="Sentiment/Color, Length/Area, Group/Topic")
+
+#End
+```
+
+Sort comments with most negative on top and print them
+------------------------------------------------------
+
+```{r}
+
+histogram(all$sentiment)
+
+sent.limit = -5
+
+all %>% filter(sentiment <= sent.limit) %>% arrange(desc(sentiment)) %>% select(text) 
+ 
+```
+
+
+Plot sentiment over time
+------------------------
+* Make sure data frame is in date order
+* aggregate by week?
+* plot time series
+* add a loess trend line
